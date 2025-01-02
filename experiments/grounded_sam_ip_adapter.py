@@ -204,3 +204,5 @@ images = ip_model.generate(
 grid = image_grid(images, 1, 4)
 display(grid)
 ################################################################################################################
+
+print("I am NewJeans")
