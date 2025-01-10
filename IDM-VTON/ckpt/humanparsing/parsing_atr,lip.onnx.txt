@@ -1,0 +1,2 @@
+parsing_atr.onnx
+parsing_lip.onnx 파일 넣을 것

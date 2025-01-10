@@ -1,0 +1,1 @@
+model.safetensors 파일 넣을것
