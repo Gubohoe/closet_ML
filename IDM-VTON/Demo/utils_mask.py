@@ -100,6 +100,17 @@ def get_mask_location(model_type, category, model_parse: Image.Image, keypoint: 
                              (parse_array == 14).astype(np.float32) + \
                              (parse_array == 15).astype(np.float32)
         parser_mask_changeable += np.logical_and(parse_array, np.logical_not(parser_mask_fixed))
+    elif category == 'jumpsuit':
+        parse_mask = (parse_array == 7).astype(np.float32) + \
+                    (parse_array == 4).astype(np.float32) + \
+                    (parse_array == 5).astype(np.float32) + \
+                    (parse_array == 6).astype(np.float32) + \
+                    (parse_array == label_map["left_arm"]).astype(np.float32) + \
+                    (parse_array == label_map["right_arm"]).astype(np.float32) + \
+                    (parse_array == label_map["left_leg"]).astype(np.float32) + \
+                    (parse_array == label_map["right_leg"]).astype(np.float32)
+
+        parser_mask_changeable += np.logical_and(parse_array, np.logical_not(parser_mask_fixed))
     else:
         raise NotImplementedError
 
