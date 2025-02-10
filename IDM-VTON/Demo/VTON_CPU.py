@@ -1,8 +1,8 @@
-#기존 gradio 데모코드 함수 기준으로 코드 변경
+#CPU 추론
 import sys
-sys.path.append('./IDM-VTON')
-from PIL import Image, ImageDraw
+sys.path.append('./')
 import torch
+from PIL import Image, ImageDraw
 from typing import List, Tuple
 import os
 import numpy as np
@@ -34,16 +34,13 @@ tensor_transform = transforms.Compose([
     transforms.Normalize([0.5], [0.5]),
 ])
 
-torch.cuda.empty_cache()
-
-#모델 로드
 def initialize_models(base_path: str) -> Tuple:
     """Initialize all required models and return them"""
-    # Initialize UNet
+    # Initialize UNet with float32
     unet = UNet2DConditionModel.from_pretrained(
         base_path,
         subfolder="unet",
-        torch_dtype=torch.float16,
+        torch_dtype=torch.float32,
     ).requires_grad_(False)
 
     # Initialize tokenizers
@@ -59,29 +56,29 @@ def initialize_models(base_path: str) -> Tuple:
         use_fast=False,
     )
 
-    # Initialize other models
+    # Initialize other models with float32
     text_encoder_one = CLIPTextModel.from_pretrained(
         base_path,
         subfolder="text_encoder",
-        torch_dtype=torch.float16,
+        torch_dtype=torch.float32,
     ).requires_grad_(False)
 
     text_encoder_two = CLIPTextModelWithProjection.from_pretrained(
         base_path,
         subfolder="text_encoder_2",
-        torch_dtype=torch.float16,
+        torch_dtype=torch.float32,
     ).requires_grad_(False)
 
     image_encoder = CLIPVisionModelWithProjection.from_pretrained(
         base_path,
         subfolder="image_encoder",
-        torch_dtype=torch.float16,
+        torch_dtype=torch.float32,
     ).requires_grad_(False)
 
     vae = AutoencoderKL.from_pretrained(
         base_path,
         subfolder="vae",
-        torch_dtype=torch.float16,
+        torch_dtype=torch.float32,
     ).requires_grad_(False)
 
     noise_scheduler = DDPMScheduler.from_pretrained(base_path, subfolder="scheduler")
@@ -89,10 +86,10 @@ def initialize_models(base_path: str) -> Tuple:
     unet_encoder = UNet2DConditionModel_ref.from_pretrained(
         base_path,
         subfolder="unet_encoder",
-        torch_dtype=torch.float16,
+        torch_dtype=torch.float32,
     ).requires_grad_(False)
 
-    # Initialize pipeline
+    # Initialize pipeline with float32
     pipe = TryonPipeline.from_pretrained(
         base_path,
         unet=unet,
@@ -104,7 +101,7 @@ def initialize_models(base_path: str) -> Tuple:
         tokenizer_2=tokenizer_two,
         scheduler=noise_scheduler,
         image_encoder=image_encoder,
-        torch_dtype=torch.float16,
+        torch_dtype=torch.float32,
     )
     pipe.unet_encoder = unet_encoder
 
@@ -114,7 +111,6 @@ def initialize_models(base_path: str) -> Tuple:
 
     return pipe, parsing_model, openpose_model
 
-#이미지 마스킹(이미지 Numpy배열로 변환 -> 임계값을 기준으로 이진 마스크 생성)
 def pil_to_binary_mask(pil_image: Image.Image, threshold: int = 0) -> Image.Image:
     np_image = np.array(pil_image)
     grayscale_image = Image.fromarray(np_image).convert("L")
@@ -124,7 +120,6 @@ def pil_to_binary_mask(pil_image: Image.Image, threshold: int = 0) -> Image.Imag
     mask = (mask * 255).astype(np.uint8)
     return Image.fromarray(mask)
 
-# 크롭 진행여부(T의 경우 가로 세로 비율에 맞춰 크롭 후 768X1024 크기로 리사이즈, F의 경우 원본 이미지 리사이즈)
 def crop_and_resize_image(image: Image.Image) -> Tuple[Image.Image, tuple]:
     width, height = image.size
     target_width = int(min(width, height * (3 / 4)))
@@ -136,14 +131,67 @@ def crop_and_resize_image(image: Image.Image) -> Tuple[Image.Image, tuple]:
     crop_coords = (left, top, right, bottom)
     return image.crop(crop_coords).resize((768, 1024)), crop_coords
 
-# 마스크 자동 생성 여부(T의 경우 OpenPose 모델, Parsing 모델을 활용하여 사람의 상체 마스크를 자동 생성 F의 경우 마스크 이미지를 받아 이진 데이터로 변환)
-def generate_mask(parsing_model, openpose_model, image: Image.Image) -> Image.Image:
+# def generate_mask(parsing_model, openpose_model, image: Image.Image, cloth_type: str) -> Image.Image:
+#     keypoints = openpose_model(image.resize((384, 512)))
+#     model_parse, _ = parsing_model(image.resize((384, 512)))
+    
+#     mask, _ = get_mask_location('hd', cloth_type, model_parse, keypoints)
+    
+#     return mask.resize((768, 1024))
+
+# +시각화 코드
+
+def generate_mask(parsing_model, openpose_model, image: Image.Image, cloth_type: str) -> Image.Image:
+     # OpenPose 실행 및 결과 시각화
     keypoints = openpose_model(image.resize((384, 512)))
-    model_parse, _ = parsing_model(image.resize((384, 512)))
-    mask, _ = get_mask_location('hd', "upper_body", model_parse, keypoints)
+    
+     # OpenPose 결과 시각화
+    openpose_vis = Image.new('RGB', (384, 512), (0, 0, 0))
+    draw = ImageDraw.Draw(openpose_vis)
+    
+     # 키포인트 그리기
+    keypoints_data = keypoints['pose_keypoints_2d']
+    for point in keypoints_data:
+        x, y = point[0], point[1]
+        if x > 0 and y > 0:  # 유효한 키포인트만 그리기
+            draw.ellipse([x-3, y-3, x+3, y+3], fill='white')
+    
+     # 결과 저장
+    openpose_vis = openpose_vis.resize((768, 1024))
+    openpose_vis.save("result/openpose_output.png")
+    print("OpenPose 결과 이미지가 openpose_output.png로 저장되었습니다.")
+
+    # Human Parsing 실행
+    model_parse, vis_parsing = parsing_model(image.resize((384, 512)))
+    
+    # PIL Image를 numpy 배열로 변환
+    model_parse_np = np.array(model_parse)
+    print("Model parse shape:", model_parse_np.shape)
+    print("Model parse value range:", model_parse_np.min(), model_parse_np.max())
+
+    # vis_parsing 처리
+    if vis_parsing is not None:
+        if isinstance(vis_parsing, Image.Image):
+            vis_parsing_np = np.array(vis_parsing)
+        else:
+            vis_parsing_np = vis_parsing
+        
+        # 시각화를 위한 컬러맵 적용
+        colored_parse = np.zeros((model_parse_np.shape[0], model_parse_np.shape[1], 3), dtype=np.uint8)
+        for label in range(int(model_parse_np.max()) + 1):
+            mask = model_parse_np == label
+            color = np.random.randint(0, 255, 3)
+            colored_parse[mask] = color
+            
+        # 결과 저장
+        Image.fromarray(colored_parse).resize((768, 1024)).save("result/humanparsing_output.png")
+        print("Human Parsing 결과 이미지가 humanparsing_output.png로 저장되었습니다.")
+
+     # 마스크 생성
+    mask, _ = get_mask_location('hd', cloth_type, model_parse, keypoints)
     mask_image = mask.resize((768, 1024))
     
-    # 마스크 시각화를 위한 mask_gray 생성
+     # 마스크 시각화를 위한 mask_gray 생성
     mask_gray = (1 - transforms.ToTensor()(mask_image)).unsqueeze(0) * tensor_transform(image)
     mask_gray = to_pil_image((mask_gray.squeeze().clamp(-1, 1) + 1) / 2)
      
@@ -156,7 +204,6 @@ def generate_mask(parsing_model, openpose_model, image: Image.Image) -> Image.Im
         
     return mask.resize((768, 1024))
 
-#Densepose모델 추론(사람의 포즈 정보를 추출하여 이미지로 저장)
 def prepare_pose_image(image: Image.Image) -> Image.Image:
     image_arg = _apply_exif_orientation(image.resize((384, 512)))
     image_arg = convert_PIL_to_numpy(image_arg, format="BGR")
@@ -172,9 +219,12 @@ def prepare_pose_image(image: Image.Image) -> Image.Image:
         'cuda'
     ))
 
-    pose_img = args.func(args, image_arg)
+    pose_img = args.func(args, image_arg)    
     pose_img = pose_img[:,:,::-1]
-    return Image.fromarray(pose_img).resize((768, 1024))
+    pose_img_pil = Image.fromarray(pose_img).resize((768, 1024))
+    # pose_img_pil.save("result/densepose_output.png")
+    # print("DensePose 결과 이미지가 densepose_output.png로 저장되었습니다.")
+    return pose_img_pil
 
 def generate_tryon_image(
     pipe,
@@ -185,17 +235,22 @@ def generate_tryon_image(
     denoise_steps: int = 50,
     seed: int = None
 ) -> Image.Image:
-    # Move models to device
-    pipe.to(device)
-    pipe.unet_encoder.to(device)
-
     # Prepare images
     pose_img = prepare_pose_image(human_image)
-    pose_tensor = tensor_transform(pose_img).unsqueeze(0).to(device, torch.float16)
-    garm_tensor = tensor_transform(garment_image).unsqueeze(0).to(device, torch.float16)
+    # 이미지 텐서는 GPU에서 생성
+    pose_tensor = tensor_transform(pose_img).unsqueeze(0).to('cuda:0', torch.float16)
+    garm_tensor = tensor_transform(garment_image).unsqueeze(0).to('cuda:0', torch.float16)
+    
+    torch.cuda.empty_cache()
+    
+    # pipe와 unet_encoder를 CPU로 이동하고 float32로 설정
+    pipe.to('cpu')
+    pipe.to(torch.float32)
+    pipe.unet_encoder.to('cpu')
+    pipe.unet_encoder.to(torch.float32)
 
-    # Set generator
-    generator = torch.Generator(device).manual_seed(seed) if seed is not None else None
+    # CPU generator 사용
+    generator = torch.Generator('cpu').manual_seed(seed) if seed is not None else None
 
     # Generate embeddings
     prompt = f"model is wearing {garment_description}"
@@ -219,18 +274,18 @@ def generate_tryon_image(
             negative_prompt=[negative_prompt],
         )
 
-    # Generate image
+    # Generate image using CPU
     images = pipe(
-        prompt_embeds=prompt_embeds.to(device, torch.float16),
-        negative_prompt_embeds=negative_prompt_embeds.to(device, torch.float16),
-        pooled_prompt_embeds=pooled_prompt_embeds.to(device, torch.float16),
-        negative_pooled_prompt_embeds=negative_pooled_prompt_embeds.to(device, torch.float16),
+        prompt_embeds=prompt_embeds.to('cpu', torch.float32),
+        negative_prompt_embeds=negative_prompt_embeds.to('cpu', torch.float32),
+        pooled_prompt_embeds=pooled_prompt_embeds.to('cpu', torch.float32),
+        negative_pooled_prompt_embeds=negative_pooled_prompt_embeds.to('cpu', torch.float32),
         num_inference_steps=denoise_steps,
         generator=generator,
         strength=1.0,
-        pose_img=pose_tensor,
-        text_embeds_cloth=prompt_embeds_c.to(device, torch.float16),
-        cloth=garm_tensor,
+        pose_img=pose_tensor.to('cpu', torch.float32),
+        text_embeds_cloth=prompt_embeds_c.to('cpu', torch.float32),
+        cloth=garm_tensor.to('cpu', torch.float32),
         mask_image=mask,
         image=human_image,
         height=1024,
@@ -238,13 +293,14 @@ def generate_tryon_image(
         ip_adapter_image=garment_image.resize((768, 1024)),
         guidance_scale=2.0,
     )[0]
-
+    
     return images[0]
 
 def process_tryon(
     human_image_path: str,
     garment_image_path: str,
     base_path: str,
+    cloth_type: str,
     mask_image_path: str = None,
     garment_description: str = "",
     auto_mask: bool = True,
@@ -268,7 +324,7 @@ def process_tryon(
 
     # Generate or load mask
     if auto_mask:
-        mask = generate_mask(parsing_model, openpose_model, human_img_processed)
+        mask = generate_mask(parsing_model, openpose_model, human_img_processed, cloth_type)
     else:
         if mask_image_path is None:
             raise ValueError("Mask image path must be provided when auto_mask is False")
@@ -295,13 +351,13 @@ def process_tryon(
 
     return result
 
-# Example usage
 if __name__ == "__main__":
     result = process_tryon(
-        human_image_path='img/human/BABY.png',
-        garment_image_path='img/garment/image.png',
+        human_image_path='img/human/bb_10M24D177.jpg',
+        garment_image_path='img/garment/pants2.jpg',
         base_path='yisol/IDM-VTON',
-        garment_description="a plain dusty blue cotton sweatshirt with crew neck and long sleeves",
+        cloth_type="jumpsuit",     #upper_body:상의, lower_body: 하의, jumpsuit: 한벌옷
+        garment_description="",
         auto_mask=True,
         crop_image=True,
         denoise_steps=40,
@@ -309,4 +365,4 @@ if __name__ == "__main__":
     )
 
     # Save result
-    result.save('result.png')
+    result.save('result_pants.png')
