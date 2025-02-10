@@ -1,0 +1,10 @@
+transformers
+pillow
+numpy
+diffusers
+pathlib 
+PIL
+fastapi
+uvicorn
+python-multipart
+timm kornia
