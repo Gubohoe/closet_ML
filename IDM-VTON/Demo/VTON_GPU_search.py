@@ -38,7 +38,7 @@ from diffusers import DDPMScheduler, AutoencoderKL
 app = FastAPI()
 
 # Gemini API 설정
-GOOGLE_API_KEY = "AIzaSyBogQtrVL5P6qBu2NGZYD13QusSV7ERNvo"
+GOOGLE_API_KEY = ""
 genai.configure(api_key=GOOGLE_API_KEY)
 persona = "Please write a description of this image in 1 or 2 lines ex:a plain dusty blue cotton sweatshirt with crew neck and long sleeves"
 model = genai.GenerativeModel('gemini-2.0-flash-001', system_instruction=persona)
