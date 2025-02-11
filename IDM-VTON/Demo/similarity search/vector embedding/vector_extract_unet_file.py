@@ -10,17 +10,25 @@ import os
 import pickle
 import json
 
+#특징 추출
 def extract_features(image: Image.Image, unet_encoder: torch.nn.Module,
                     tensor_transform: transforms.Compose, device: str = 'cuda'):
-    """Extract features with proper dimension handling"""
+   
     print("Extracting features from image...")
     try:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+        # 이미지를 텐서로 변환하고 정규화
         image_tensor = tensor_transform(image)
+        
+        # 이미지와 같은 크기의 마스크(0으로 채워진) 생성
         mask = torch.zeros((1, image_tensor.shape[1], image_tensor.shape[2]))
+        
+        # 이미지 텐서와 마스크를 결합 (채널 차원으로)
         image_tensor = torch.cat([image_tensor, mask], dim=0)
+        
+        # 배치 차원 추가하고 GPU로 이동, float16으로 변환
         image_tensor = image_tensor.unsqueeze(0).to(device, torch.float16)
 
         timesteps = torch.zeros(1, device=device)
@@ -34,22 +42,25 @@ def extract_features(image: Image.Image, unet_encoder: torch.nn.Module,
                 return_dict=False
             )
 
+            # 특징 벡터 저장을 위한 리스트
             feature_vectors = []
+            
+            # 각 특징 맵의 차원에 따라 적절한 평균값 계산
             for feat in garment_features:
-                if len(feat.shape) == 2:
+                if len(feat.shape) == 2:     # 2D 텐서는 그대로 사용
                     feat_mean = feat
-                elif len(feat.shape) == 3:
+                elif len(feat.shape) == 3:    # 3D 텐서는 마지막 차원으로 평균
                     feat_mean = feat.mean(dim=2)
-                elif len(feat.shape) == 4:
+                elif len(feat.shape) == 4:    # 4D 텐서는 마지막 두 차원으로 평균
                     feat_mean = feat.mean(dim=[2, 3])
                 else:
                     continue
-
                 feature_vectors.append(feat_mean.cpu())
 
             if not feature_vectors:
                 raise ValueError("No features were successfully processed")
-
+            
+            #벡터 결합 및 반환
             all_features = torch.cat(feature_vectors, dim=1).numpy()
             return all_features.flatten()
 
@@ -57,8 +68,8 @@ def extract_features(image: Image.Image, unet_encoder: torch.nn.Module,
         print(f"Error extracting features: {str(e)}")
         raise e
 
+#모델 초기화
 def initialize_model(model_path: str = 'yisol/IDM-VTON', device: str = 'cuda'):
-    """Initialize model with detailed logging"""
     print(f"Initializing model from {model_path}")
     try:
         if torch.cuda.is_available():
@@ -82,9 +93,9 @@ def initialize_model(model_path: str = 'yisol/IDM-VTON', device: str = 'cuda'):
     except Exception as e:
         print(f"Error initializing model: {str(e)}")
         raise e
-
+    
+#벡터와 메타데이터를 파일로 저장
 def save_features(features: np.ndarray, image_path: str, save_dir: str, category: str):
-    """벡터와 메타데이터를 파일로 저장"""
     os.makedirs(save_dir, exist_ok=True)
     
     # 이미지 파일명에서 확장자 제거
@@ -109,8 +120,8 @@ def save_features(features: np.ndarray, image_path: str, save_dir: str, category
     print(f"Saved features for {base_name}")
     return vector_path, metadata_path
 
+#폴더 내의 모든 의류 이미지 처리
 def process_garment_folder(folder_path: str, category: str, save_dir: str = 'vectors'):
-    """폴더 내의 모든 의류 이미지 처리"""
     print(f"\nProcessing folder: {folder_path}")
     print(f"Category: {category}")
 

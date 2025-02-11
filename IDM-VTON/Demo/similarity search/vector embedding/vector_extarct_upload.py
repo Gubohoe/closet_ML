@@ -43,9 +43,9 @@ class ImageEmbeddingService:
         # Firebase 초기화
         if firebase_cred_path and storage_bucket:
             self._initialize_firebase(firebase_cred_path, storage_bucket)
-        
+            
+    #Firebase 서비스 초기화  
     def _initialize_firebase(self, cred_path, storage_bucket):
-        """Firebase 서비스 초기화"""
         try:
             cred = credentials.Certificate(cred_path)
             firebase_admin.initialize_app(cred, {
@@ -58,8 +58,8 @@ class ImageEmbeddingService:
             print(f"Firebase 초기화 오류: {str(e)}")
             raise e
         
+    #임베딩 추출을 위한 모델 생성        
     def _build_model(self):
-        """임베딩 추출을 위한 모델 생성"""
         model_args = {
             'weights': 'imagenet',
             'include_top': False,
@@ -88,14 +88,14 @@ class ImageEmbeddingService:
             
         return Model(inputs=base_model.input, outputs=x)
     
+    #단일 이미지 로드 및 전처리
     def load_image(self, image_path):
-        """단일 이미지 로드 및 전처리"""
         img = Image.open(image_path).convert('RGB')
         img = self._preprocess_image(img)
         return img
     
+        #이미지 리사이즈 및 패딩
     def _preprocess_image(self, img):
-        """이미지 전처리 - 리사이즈 및 패딩"""
         width, height = img.size
         if width == height:
             padded_img = img
@@ -109,8 +109,8 @@ class ImageEmbeddingService:
         resized_img = padded_img.resize(self.target_size)
         return np.array(resized_img)
     
+    #이미지 배치에서 임베딩 추출
     def get_embeddings(self, images):
-        """이미지 배치에서 임베딩 추출"""
         if isinstance(images, str):
             images = [self.load_image(images)]
             images = np.array(images)
@@ -121,9 +121,9 @@ class ImageEmbeddingService:
         processed_images = self.preprocess(images)
         embeddings = self.model.predict(processed_images)
         return embeddings
-
+    
+    #이미지를 Firebase Storage에 업로드하고 URL 반환#
     def upload_to_storage(self, image_path: str, category: str) -> str:
-        """이미지를 Firebase Storage에 업로드하고 URL 반환"""
         try:
             timestamp = int(time.time())
             blob_path = f"garments/{category}/{timestamp}_{os.path.basename(image_path)}"
@@ -140,9 +140,9 @@ class ImageEmbeddingService:
         except Exception as e:
             print(f"Storage 업로드 오류: {str(e)}")
             raise e
-
+        
+    #벡터와 메타데이터를 Firestore에 저장
     def save_to_firestore(self, url: str, vector: np.ndarray, category: str):
-        """벡터와 메타데이터를 Firestore에 저장"""
         try:
             doc_ref = self.db.collection('garments').document()
             doc_data = {
@@ -157,9 +157,9 @@ class ImageEmbeddingService:
         except Exception as e:
             print(f"Firestore 저장 오류: {str(e)}")
             raise e
-
+        
+     #폴더 내의 모든 의류 이미지 처리 및 저장#
     def process_folder(self, folder_path: str, category: str):
-        """폴더 내의 모든 의류 이미지 처리 및 저장"""
         print(f"\n폴더 처리 시작: {folder_path}")
         print(f"카테고리: {category}")
         

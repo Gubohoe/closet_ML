@@ -4,7 +4,7 @@ import faiss
 import numpy as np
 from typing import List, Dict, Tuple
 import time
-from Recommand import ImageEmbedding
+from vector_embedding.vector_extarct_upload import ImageEmbeddingService
 
 class GarmentSearchService:
     def __init__(self, firebase_cred_path: str):

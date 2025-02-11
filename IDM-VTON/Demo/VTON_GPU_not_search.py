@@ -18,7 +18,6 @@ from fastapi import FastAPI, File, UploadFile, Response, Form
 import shutil
 import io
 
-# Import your custom pipeline and models
 from src.tryon_pipeline import StableDiffusionXLInpaintPipeline as TryonPipeline
 from src.unet_hacked_garmnet import UNet2DConditionModel as UNet2DConditionModel_ref
 from src.unet_hacked_tryon import UNet2DConditionModel
@@ -42,21 +41,24 @@ model = genai.GenerativeModel('gemini-2.0-flash-001', system_instruction=persona
 
 # 전역 변수
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+
 tensor_transform = transforms.Compose([
    transforms.ToTensor(),
    transforms.Normalize([0.5], [0.5]),
 ])
 
-# GPU 모델들을 전역 변수로 선언
+# GPU 모델들을 전역 변수로 선언(서버 구동 시 한번만 로드하기위해서)
 pipe = None
 parsing_model = None
 openpose_model = None
 
+#서버 실행할 때 모델들 초기화
 @app.on_event("startup")
 async def startup_event():
    global pipe, parsing_model, openpose_model
    pipe, parsing_model, openpose_model = initialize_models('yisol/IDM-VTON')
 
+#서버 종료시 GPU 메모리 청소
 @app.on_event("shutdown")
 async def shutdown_event():
     global pipe, parsing_model, openpose_model
@@ -69,34 +71,42 @@ async def shutdown_event():
     parsing_model = None
     openpose_model = None
 
-# 필요한 함수들
+#마스크 이진(0, 1)바이너리로 변환
 def pil_to_binary_mask(pil_image: Image.Image, threshold: int = 0) -> Image.Image:
     np_image = np.array(pil_image)
-    grayscale_image = Image.fromarray(np_image).convert("L")
-    binary_mask = np.array(grayscale_image) > threshold
-    mask = np.zeros(binary_mask.shape, dtype=np.uint8)
-    mask[binary_mask] = 1
-    mask = (mask * 255).astype(np.uint8)
+    grayscale_image = Image.fromarray(np_image).convert("L")    #이미지 그레이 스케일로 변환
+    binary_mask = np.array(grayscale_image) > threshold     #그레이 스케일에서 np로 변환(threshold 비교를 통해 T, F로 변환)
+    mask = np.zeros(binary_mask.shape, dtype=np.uint8)      #같은 크기의 0으로 이뤄진 배열 생성
+    mask[binary_mask] = 1                                   #T였던 위치에 1 할당 => 0, 1로 이뤄진 이진 마스크 생성
+    mask = (mask * 255).astype(np.uint8)                    #0, 255로 스케일링(이미지 기본 포맷의 표준)
     return Image.fromarray(mask)
 
+#이미지 크롭 및 리사이즈
 def crop_and_resize_image(image: Image.Image) -> Tuple[Image.Image, tuple]:
     width, height = image.size
-    target_width = int(min(width, height * (3 / 4)))
-    target_height = int(min(height, width * (4 / 3)))
+    target_width = int(min(width, height * (3 / 4)))       #이미지 3:4비율 계산
+    target_height = int(min(height, width * (4 / 3)))       #이미지 4:3비율 계산
     left = (width - target_width) // 2
     top = (height - target_height) // 2
     right = (width + target_width) // 2
-    bottom = (height + target_height) // 2
-    crop_coords = (left, top, right, bottom)
-    return image.crop(crop_coords).resize((768, 1024)), crop_coords
+    bottom = (height + target_height) // 2          #이미지 중앙 기준
+    crop_coords = (left, top, right, bottom)        #크롭 진행
+    return image.crop(crop_coords).resize((768, 1024)), crop_coords # 크롭 이미지 리사이즈
 
+#마스크 생성
 def generate_mask(parsing_model, openpose_model, image: Image.Image, cloth_type: str) -> Image.Image:
-    keypoints = openpose_model(image.resize((384, 512)))
-    model_parse, _ = parsing_model(image.resize((384, 512)))
-    mask, _ = get_mask_location('hd', cloth_type, model_parse, keypoints)
+    keypoints = openpose_model(image.resize((384, 512)))        #openpose 모델로 부터 사람 키포인트 데이터 추출
+    model_parse, _ = parsing_model(image.resize((384, 512)))        #humanParsing 모델로부터 사람 파싱 데이터 추출
+    mask, _ = get_mask_location('hd', cloth_type, model_parse, keypoints)   #두 데이터를 입력으로 마스크 생성
     return mask.resize((768, 1024))
 
+#포즈 이미지 준비
 def prepare_pose_image(image: Image.Image) -> Image.Image:
+    
+    # DensePose가 추출한 IUV 정보(3D 표면 매핑)를 시각화된 2D 이미지로 렌더링합니다
+    # 각 신체 부위는 서로 다른 색상으로 표현
+    # UV 좌표값은 색상의 그라데이션으로 표현
+    
     image_arg = _apply_exif_orientation(image.resize((384, 512)))
     image_arg = convert_PIL_to_numpy(image_arg, format="BGR")
     args = apply_net.create_argument_parser().parse_args((
@@ -109,10 +119,11 @@ def prepare_pose_image(image: Image.Image) -> Image.Image:
         'MODEL.DEVICE',
         'cuda'
     ))
-    pose_img = args.func(args, image_arg)
+    pose_img = args.func(args, image_arg)   
     pose_img = pose_img[:,:,::-1]
     return Image.fromarray(pose_img).resize((768, 1024))
 
+#사용 모델 초기화
 def initialize_models(base_path: str) -> Tuple:
     # Initialize UNet
     unet = UNet2DConditionModel.from_pretrained(
@@ -148,6 +159,7 @@ def initialize_models(base_path: str) -> Tuple:
         base_path, subfolder="unet_encoder", torch_dtype=torch.float16
     ).requires_grad_(False)
     
+    #모델 파이프 구성
     pipe = TryonPipeline.from_pretrained(
         base_path,
         unet=unet,
@@ -168,25 +180,28 @@ def initialize_models(base_path: str) -> Tuple:
 
     return pipe, parsing_model, openpose_model
 
+#Virtual Try-On 진행
 def generate_tryon_image(pipe, human_image: Image.Image, garment_image: Image.Image,
                         mask: Image.Image, garment_description: str,
                         denoise_steps: int = 50, seed: int = None) -> Image.Image:
     
-    pose_img = prepare_pose_image(human_image)
-    pose_tensor = tensor_transform(pose_img).unsqueeze(0).to(device, torch.float16)
-    garm_tensor = tensor_transform(garment_image).unsqueeze(0).to(device, torch.float16)
+    pose_img = prepare_pose_image(human_image)  #DensePose 모델을 통해 인체 포즈 이미지 생성
+    pose_tensor = tensor_transform(pose_img).unsqueeze(0).to(device, torch.float16)     #포즈 이미지 텐서로 변환
+    garm_tensor = tensor_transform(garment_image).unsqueeze(0).to(device, torch.float16)    #옷 이미지 텐서롭 변환
     
     torch.cuda.empty_cache()
     
-    pipe.to(device)
-    pipe.unet_encoder.to(device)
+    pipe.to(device)     #pipe GPU 이동
 
     generator = torch.Generator(device).manual_seed(seed) if seed is not None else None
 
+    #프롬프트 생성
     prompt = f"model is wearing {garment_description}"
     negative_prompt = "monochrome, lowres, bad anatomy, worst quality, low quality"
 
-    with torch.inference_mode():
+    #프롬프트 임베딩 생성(CLIP)
+    with torch.inference_mode():    #추론모드에서 텍스트 프롬프트 벡터 임베딩
+        #전체 가상 피팅에 이미지 생성을 위한 임베딩
         prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds = (
             pipe.encode_prompt(
                 prompt,
@@ -196,7 +211,8 @@ def generate_tryon_image(pipe, human_image: Image.Image, garment_image: Image.Im
             )
         )
 
-        prompt = f"a photo of {garment_description}"
+        #의상의 특징을 위한 임베딩
+        prompt = f"a photo of {garment_description}"    #의상에 대한 프롬프트 벡터 임베딩
         prompt_embeds_c, _, _, _ = pipe.encode_prompt(
             [prompt],
             num_images_per_prompt=1,
@@ -204,6 +220,7 @@ def generate_tryon_image(pipe, human_image: Image.Image, garment_image: Image.Im
             negative_prompt=[negative_prompt],
         )
 
+    #피팅을 위해 생성한 마스크, 벡터값, 이미지 등 float16으로 변환 및 GPU로 이동
     images = pipe(
         prompt_embeds=prompt_embeds.to(device, torch.float16),
         negative_prompt_embeds=negative_prompt_embeds.to(device, torch.float16),
@@ -227,6 +244,7 @@ def generate_tryon_image(pipe, human_image: Image.Image, garment_image: Image.Im
 
 # FastAPI 엔드포인트
 # 상의/하의/한벌옷
+# 클라이언트로부터 사람이미지, 옷 이미지, 옷 타입을 받아 피팅 결과를 출력
 @app.post("/try-on")
 async def try_on(
    human_image: UploadFile = File(...),
@@ -237,6 +255,7 @@ async def try_on(
 ):
    try:
        print(f"Received cloth_type: {cloth_type}")
+       #받은 이미지 PIL Image, RGB로 변환
        human_img = Image.open(io.BytesIO(await human_image.read())).convert("RGB")
        garment_img = Image.open(io.BytesIO(await garment_image.read())).convert("RGB").resize((768, 1024))
 
@@ -253,11 +272,13 @@ async def try_on(
        garment_description = response.text
        print(garment_description)
 
-       # 이미지 처리
+       # 이미지 처리(이미지 리사이즈-> 마스크 생성-> VTON 진행)
        human_img_processed, _ = crop_and_resize_image(human_img)
+       # 마스크 생성
        mask = generate_mask(parsing_model, openpose_model, human_img_processed, cloth_type)
        torch.cuda.empty_cache()
 
+        #피팅 진행
        result = generate_tryon_image(
            pipe,
            human_img_processed,

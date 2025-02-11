@@ -19,8 +19,8 @@ from diffusers import AutoencoderKL
 db = None
 bucket = None
 
+#Google Firebase 서비스 초기화
 def initialize_firebase(cred_path: str, storage_bucket: str):
-    """Initialize Firebase services"""
     try:
         global db, bucket
         cred = credentials.Certificate(cred_path)
@@ -34,8 +34,8 @@ def initialize_firebase(cred_path: str, storage_bucket: str):
         print(f"Firebase initialization error: {str(e)}")
         raise e
 
+#firebase Storage 이미지 업로드
 def upload_to_storage(image_path: str, category: str) -> str:
-    """Upload image to Firebase Storage and return URL"""
     try:
         timestamp = int(time.time())
         blob_path = f"garments/{category}/{timestamp}_{os.path.basename(image_path)}"
@@ -53,8 +53,8 @@ def upload_to_storage(image_path: str, category: str) -> str:
         print(f"Storage upload error: {str(e)}")
         raise e
 
+#Qdrant clinet 초기화 및 Collection 생성
 def initialize_qdrant(collection_name: str, vector_size: int) -> QdrantClient:
-    """Initialize Qdrant client and create collection"""
     try:
         client = QdrantClient(host="localhost", port=6333)
         
@@ -76,6 +76,7 @@ def initialize_qdrant(collection_name: str, vector_size: int) -> QdrantClient:
         print(f"Error initializing Qdrant: {str(e)}")
         raise e
 
+#Qdrant 벡터 및 메타 데이터 저장
 def save_to_qdrant(
     client: QdrantClient,
     collection_name: str,
@@ -83,7 +84,6 @@ def save_to_qdrant(
     metadata: Dict[str, Any],
     point_id: int
 ) -> bool:
-    """Save feature vectors and metadata to Qdrant with detailed debugging"""
     try:
         # Debug info
         print("\nDebug info before saving:")
@@ -135,6 +135,7 @@ def save_to_qdrant(
         print(f"Error type: {type(e)}")
         return False
 
+#모델 초기화
 def initialize_model(model_path: str = 'yisol/IDM-VTON', device: str = 'cuda'):
     """Initialize both UNet and VAE models"""
     print(f"Initializing models from {model_path}")
@@ -169,83 +170,74 @@ def initialize_model(model_path: str = 'yisol/IDM-VTON', device: str = 'cuda'):
         print(f"Error initializing models: {str(e)}")
         raise e
 
-def extract_features(image: Image.Image, unet_encoder: torch.nn.Module, vae: AutoencoderKL,
-                    tensor_transform: transforms.Compose, device: str = 'cuda',
-                    target_dims: int = 65536):
-    """Extract features using UNet and compress using VAE"""
-    print("Extracting features from image...")
-    try:
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+#특징 추출
+def extract_features(image: Image.Image, target_dims: int = 65536, device = "cuda"):
+    # 이미지를 텐서로 변환하고 정규화
+    image_tensor = tensor_transform(image)
+    
+    # 이미지와 같은 크기의 마스크(0으로 채워진) 생성
+    mask = torch.zeros((1, image_tensor.shape[1], image_tensor.shape[2]))
+    
+    # 이미지 텐서와 마스크를 결합 (채널 차원으로)
+    image_tensor = torch.cat([image_tensor, mask], dim=0)
+    
+    # 배치 차원 추가하고 GPU로 이동, float16으로 변환
+    image_tensor = image_tensor.unsqueeze(0).to(device, torch.float16)
 
-        # Step 1: UNet feature extraction
-        image_tensor = tensor_transform(image)
-        mask = torch.zeros((1, image_tensor.shape[1], image_tensor.shape[2]))
-        image_tensor = torch.cat([image_tensor, mask], dim=0)
-        image_tensor = image_tensor.unsqueeze(0).to(device, torch.float16)
+    # UNet 인코더에 필요한 시간 스텝과 인코더 상태 초기화
+    timesteps = torch.zeros(1, device=device)
+    encoder_hidden_states = torch.zeros(1, 77, 2048, device=device, dtype=torch.float16)
 
-        timesteps = torch.zeros(1, device=device)
-        encoder_hidden_states = torch.zeros(1, 77, 2048, device=device, dtype=torch.float16)
-
-        with torch.no_grad():
-            # Get UNet features
-            _, garment_features = unet_encoder(
+    with torch.no_grad():  # 그래디언트 계산 비활성화
+        # UNet 인코더로 이미지 특징 추출
+        _, garment_features = unet_encoder(
                 image_tensor,
                 timesteps,
                 encoder_hidden_states,
                 return_dict=False
             )
 
-            # Process UNet features
-            feature_vectors = []
-            for feat in garment_features:
-                if len(feat.shape) == 2:
-                    feat_mean = feat
-                elif len(feat.shape) == 3:
-                    feat_mean = feat.mean(dim=2)
-                elif len(feat.shape) == 4:
-                    feat_mean = feat.mean(dim=[2, 3])
-                else:
-                    continue
-                feature_vectors.append(feat_mean.cpu())
+        # 특징 벡터 저장을 위한 리스트
+        feature_vectors = []
+        
+        # 각 특징 맵의 차원에 따라 적절한 평균값 계산
+        for feat in garment_features:
+            if len(feat.shape) == 2:     # 2D 텐서는 그대로 사용
+                feat_mean = feat
+            elif len(feat.shape) == 3:    # 3D 텐서는 마지막 차원으로 평균
+                feat_mean = feat.mean(dim=2)
+            elif len(feat.shape) == 4:    # 4D 텐서는 마지막 두 차원으로 평균
+                feat_mean = feat.mean(dim=[2, 3])
+            else:
+                continue
+            feature_vectors.append(feat_mean.cpu())
 
-            if not feature_vectors:
-                raise ValueError("No features were successfully processed")
+        # 모든 특징 벡터를 하나로 연결
+        all_features = torch.cat(feature_vectors, dim=1)
+        
+        # 목표 차원 크기에 맞게 특징 맵 크기 조정
+        target_latent_size = int(np.sqrt(target_dims // 4))
+        input_side_length = int(target_latent_size / 0.13025)
+        needed_features = 3 * input_side_length * input_side_length
+        
+        # RGB 이미지 형태로 특징 재구성
+        features_rgb = all_features[:, :needed_features].reshape(1, 3, input_side_length, input_side_length)
+        features_rgb = features_rgb.to(device, torch.float16)
+        
+        # -1에서 1 사이로 정규화
+        features_rgb = 2 * (features_rgb - features_rgb.min()) / (features_rgb.max() - features_rgb.min()) - 1
+        
+        # VAE로 잠재 공간으로 인코딩
+        latents = vae.encode(features_rgb).latent_dist.sample()
+        features = latents.flatten().cpu().numpy()
+        
+        # 목표 차원 수에 맞게 자르기
+        if len(features) > target_dims:
+            features = features[:target_dims]
+        
+        return features
 
-            # Concatenate UNet features
-            all_features = torch.cat(feature_vectors, dim=1)
-            
-            # Step 2: VAE compression
-            # Calculate maximum size for 3-channel image that will result in appropriate VAE output
-            # VAE scaling factor is 0.13025, so we need to calculate backwards
-            target_latent_size = int(np.sqrt(target_dims // 4))  # 4 is VAE's latent_channels
-            input_side_length = int(target_latent_size / 0.13025)
-            
-            # Reshape features into a 3-channel format with calculated size
-            needed_features = 3 * input_side_length * input_side_length
-            features_rgb = all_features[:, :needed_features].reshape(1, 3, input_side_length, input_side_length)
-            features_rgb = features_rgb.to(device, torch.float16)
-            
-            # Scale to [-1, 1] range expected by VAE
-            features_rgb = 2 * (features_rgb - features_rgb.min()) / (features_rgb.max() - features_rgb.min()) - 1
-            
-            # Use VAE to encode
-            latents = vae.encode(features_rgb).latent_dist.sample()
-            
-            # Get the final compressed representation
-            features = latents.flatten().cpu().numpy()
-            
-            # Final truncation to ensure we're within Qdrant's limits
-            if len(features) > target_dims:
-                features = features[:target_dims]
-            
-            print(f"Final feature vector size: {features.shape[0]}")
-            return features
-
-    except Exception as e:
-        print(f"Error extracting features: {str(e)}")
-        raise e
-
+#폴더 내 이미지 벡터 추출 및 저장 Process
 def process_garment_folder(
     folder_path: str,
     category: str,
@@ -255,7 +247,6 @@ def process_garment_folder(
     tensor_transform: transforms.Compose,
     start_id: int = 0  # 시작 ID를 파라미터로 받음
 ):
-    """Process folder with UNet+VAE feature extraction"""
     print(f"\nProcessing folder: {folder_path}")
     print(f"Category: {category}")
     print(f"Starting from ID: {start_id}")
@@ -264,7 +255,6 @@ def process_garment_folder(
         image_paths = list(Path(folder_path).glob('*.jpg')) + list(Path(folder_path).glob('*.png'))
         print(f"Found {len(image_paths)} images in folder")
         
-        # Initialize with first image
         sample_image = Image.open(str(image_paths[0])).convert('RGB')
         sample_features = extract_features(sample_image, unet_encoder, vae, tensor_transform)
         vector_size = len(sample_features)
@@ -308,7 +298,7 @@ if __name__ == "__main__":
     try:
         # Initialize Firebase
         cred_path = "path/to/your/firebase-credentials.json"
-        storage_bucket = "recommand-c51a9.firebasestorage.app"
+        storage_bucket = ""
         initialize_firebase(cred_path, storage_bucket)
         
         # Initialize models
