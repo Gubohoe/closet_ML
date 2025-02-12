@@ -71,16 +71,6 @@ async def shutdown_event():
     parsing_model = None
     openpose_model = None
 
-#마스크 이진(0, 1)바이너리로 변환
-def pil_to_binary_mask(pil_image: Image.Image, threshold: int = 0) -> Image.Image:
-    np_image = np.array(pil_image)
-    grayscale_image = Image.fromarray(np_image).convert("L")    #이미지 그레이 스케일로 변환
-    binary_mask = np.array(grayscale_image) > threshold     #그레이 스케일에서 np로 변환(threshold 비교를 통해 T, F로 변환)
-    mask = np.zeros(binary_mask.shape, dtype=np.uint8)      #같은 크기의 0으로 이뤄진 배열 생성
-    mask[binary_mask] = 1                                   #T였던 위치에 1 할당 => 0, 1로 이뤄진 이진 마스크 생성
-    mask = (mask * 255).astype(np.uint8)                    #0, 255로 스케일링(이미지 기본 포맷의 표준)
-    return Image.fromarray(mask)
-
 #이미지 크롭 및 리사이즈
 def crop_and_resize_image(image: Image.Image) -> Tuple[Image.Image, tuple]:
     width, height = image.size

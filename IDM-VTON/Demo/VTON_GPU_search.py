@@ -125,16 +125,6 @@ def initialize_models(base_path: str) -> Tuple:
 
    return pipe, parsing_model, openpose_model, tensor_transform, feature_transform
 
-#마스크 이진(0, 1)바이너리로 변환
-def pil_to_binary_mask(pil_image: Image.Image, threshold: int = 0) -> Image.Image:
-    np_image = np.array(pil_image)
-    grayscale_image = Image.fromarray(np_image).convert("L")    #이미지 그레이 스케일로 변환
-    binary_mask = np.array(grayscale_image) > threshold     #그레이 스케일에서 np로 변환(threshold 비교를 통해 T, F로 변환)
-    mask = np.zeros(binary_mask.shape, dtype=np.uint8)      #같은 크기의 0으로 이뤄진 배열 생성
-    mask[binary_mask] = 1                                   #T였던 위치에 1 할당 => 0, 1로 이뤄진 이진 마스크 생성
-    mask = (mask * 255).astype(np.uint8)                    #0, 255로 스케일링(이미지 기본 포맷의 표준)
-    return Image.fromarray(mask)
-
 #이미지 크롭 및 리사이즈
 def crop_and_resize_image(image: Image.Image) -> Tuple[Image.Image, tuple]:
     width, height = image.size
@@ -183,7 +173,7 @@ def generate_tryon_image(pipe, human_image: Image.Image, garment_image: Image.Im
    
    pose_img = prepare_pose_image(human_image)   #DensePose 모델을 통해 인체 포즈 이미지 생성
    pose_tensor = tensor_transform(pose_img).unsqueeze(0).to(device, torch.float16)  #포즈 이미지 텐서로 변환
-   garm_tensor = tensor_transform(garment_image).unsqueeze(0).to(device, torch.float16)  #옷 이미지 텐서롭 변환
+   garm_tensor = tensor_transform(garment_image).unsqueeze(0).to(device, torch.float16)  #옷 이미지 텐서로 변환
 
    pipe.to(device)  #pipe GPU 이동
 
@@ -213,7 +203,7 @@ def generate_tryon_image(pipe, human_image: Image.Image, garment_image: Image.Im
            negative_prompt=[negative_prompt],
        )
 
-    #피팅을 위해 생성한 마스크, 벡터값, 이미지 등 float16으로 변환 및 GPU로 이동
+    #생성한 마스크, 벡터값, 이미지 등 float16으로 변환 및 GPU로 이동, 피팅진행
    images = pipe(
        prompt_embeds=prompt_embeds.to(device, torch.float16),
        negative_prompt_embeds=negative_prompt_embeds.to(device, torch.float16),
@@ -255,67 +245,6 @@ def extract_features(image: Image.Image, target_dims: int = 65536):
         )
 
         #특징 벡터 저장 리스트
-        feature_vectors = []
-        
-        # 각 특징 맵의 차원에 따라 적절한 평균값 계산
-        for feat in garment_features:
-            if len(feat.shape) == 2:     # 2D 텐서는 그대로 사용
-                feat_mean = feat
-            elif len(feat.shape) == 3:    # 3D 텐서는 마지막 차원으로 평균
-                feat_mean = feat.mean(dim=2)
-            elif len(feat.shape) == 4:    # 4D 텐서는 마지막 두 차원으로 평균
-                feat_mean = feat.mean(dim=[2, 3])
-            else:
-                continue
-            feature_vectors.append(feat_mean.cpu())
-
-        # 모든 특징 벡터를 하나로 연결
-        all_features = torch.cat(feature_vectors, dim=1)
-        
-        # 목표 차원 크기에 맞게 특징 맵 크기 조정
-        target_latent_size = int(np.sqrt(target_dims // 4))
-        input_side_length = int(target_latent_size / 0.13025)
-        needed_features = 3 * input_side_length * input_side_length
-        
-        # RGB 이미지 형태로 특징 재구성
-        features_rgb = all_features[:, :needed_features].reshape(1, 3, input_side_length, input_side_length)
-        features_rgb = features_rgb.to(device, torch.float16)
-        
-        # -1에서 1 사이로 정규화
-        features_rgb = 2 * (features_rgb - features_rgb.min()) / (features_rgb.max() - features_rgb.min()) - 1
-        
-        # VAE로 잠재 공간으로 인코딩
-        latents = pipe.vae.encode(features_rgb).latent_dist.sample()
-        features = latents.flatten().cpu().numpy()
-        
-        # 목표 차원 수에 맞게 자르기
-        if len(features) > target_dims:
-            features = features[:target_dims]
-        
-        return features
-
-def extract_features(image: Image.Image, target_dims: int = 65536):
-    # 이미지를 텐서로 변환하고 정규화
-    image_tensor = feature_transform(image)
-    
-    # 이미지와 같은 크기의 마스크(0으로 채워진) 생성
-    mask = torch.zeros((1, image_tensor.shape[1], image_tensor.shape[2]))
-    
-    # 이미지 텐서와 마스크를 결합 (채널 차원으로)
-    image_tensor = torch.cat([image_tensor, mask], dim=0)
-    
-    # 배치 차원 추가하고 GPU로 이동, float16으로 변환
-    image_tensor = image_tensor.unsqueeze(0).to(device, torch.float16)
-
-    # UNet 인코더에 필요한 시간 스텝과 인코더 상태 초기화
-    timesteps = torch.zeros(1, device=device)
-    encoder_hidden_states = torch.zeros(1, 77, 2048, device=device, dtype=torch.float16)
-
-    with torch.no_grad():  # 그래디언트 계산 비활성화
-        # UNet 인코더로 이미지 특징 추출
-        _, garment_features = pipe.unet_encoder(...)
-
-        # 특징 벡터 저장을 위한 리스트
         feature_vectors = []
         
         # 각 특징 맵의 차원에 따라 적절한 평균값 계산
